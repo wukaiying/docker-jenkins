@@ -1,0 +1,108 @@
+apply plugin: 'docker'
+apply plugin: 'base'
+
+def buildVersion = ("${Build_Upload_Name}" == "null") ? "latest.integration" : "${Build_Upload_Name}"
+
+dependencies {
+	println("Will use buildVersion ${buildVersion}")
+	assemble(group: 'com.ibm.ecm', name: 'cpe', version: buildVersion, classifier: 'Engine-liberty', ext: 'ear')
+	assemble(group: 'com.ibm.ecm', name: 'cpe', version: buildVersion, classifier: 'version', ext: 'txt')
+}
+
+def dependencyDir = new File(buildDir, 'dependencies')
+def dockerDir = new File(buildDir, 'docker')
+
+task assembleDependencies(type: Copy) {
+	from configurations.assemble
+	into dependencyDir
+}
+
+task assembleResources(dependsOn: assembleDependencies){
+	inputs.dir dependencyDir
+	outputs.dir dockerDir
+
+	doLast {
+		dependencyDir.listFiles().each { source ->
+				def destDir = "${dockerDir}"
+				println("copying ${source.name} to ${destDir}")
+				copy {
+						from source
+						into destDir
+						if (source.name.contains('Engine-liberty')) {
+							rename {'Engine-liberty.ear'}
+						}
+					}
+
+					copy {
+							from source
+							into destDir
+							if (source.name.contains('-version')) {
+								rename {'cpe_version.txt'}
+							}
+						}
+			}
+		}
+}
+
+defaultTasks 'image', 'clean'
+
+task image(type: Docker, dependsOn: assembleResources){
+  baseImage "ecm-containerization-docker-local.artifactory.swg-devops.com/liberty:latest"
+  applicationName = 'cpe'
+
+  setEnvironment('MON_LOG_PATH','/opt/ibm/wlp/usr/servers/defaultServer/FileNet/p8_server*.log:/opt/ibm/wlp/usr/servers/defaultServer/FileNet/*/pesvr_*.log')
+  setEnvironment('ECM_PRODUCT_TYPE','CPE_530_592')
+
+	setEnvironment('GCDUSER','CEAdmin')
+
+  runCommand '/opt/ibm/wlp/bin/installUtility install javaee-7.0 concurrent-1.0 adminCenter-1.0 --acceptLicense'
+
+	addFile 'resources/cpe-setup.sh', '/usr/bin'
+	runCommand 'chmod 755 /usr/bin/cpe-setup.sh'
+
+  //create configDropins directories
+  runCommand 'mkdir -p /opt/ibm/wlp/usr/servers/defaultServer/configDropins/defaults'
+  runCommand 'mkdir -p /opt/ibm/wlp/usr/servers/defaultServer/configDropins/overrides'
+
+  //create security directory for ltpa key and SSL keystore
+  //runCommand 'mkdir -p /opt/ibm/wlp/usr/servers/defaultServer/resources/security'
+
+  //create ASA directory
+  runCommand 'mkdir -p /opt/ibm/asa'
+
+  //create text extraction directory
+  runCommand 'mkdir -p /opt/ibm/textext'
+
+  //create ICM rules directory
+  runCommand 'mkdir -p /opt/ibm/icmrules'
+
+  //copy CPE ear to the apps directory under
+  addFile 'Engine-liberty.ear', '/opt/ibm/wlp/usr/servers/defaultServer/apps/'
+
+  //add cpe_version.txt
+  addFile 'cpe_version.txt', '/opt/ibm'
+
+  //add config file
+  addFile 'resources/log4j.properties', '/opt/ibm/wlp/usr/servers/defaultServer/'
+  addFile 'resources/jvm.options.tpl', '/opt/ibm/wlp/usr/servers/defaultServer/'
+  addFile 'resources/server.xml', '/opt/ibm/wlp/usr/servers/defaultServer/'
+  //addFile 'resources/CEMPBoot.properties', '/opt/ibm/wlp/usr/servers/defaultServer/'
+  addFile 'resources/liberty-logging.xml', '/opt/ibm/wlp/usr/servers/defaultServer/configDropins/defaults'
+
+  //add CPE application deployment descriptor with JAAS login module configuration
+  addFile 'resources/Engine-liberty.xml', '/opt/ibm/wlp/usr/servers/defaultServer/configDropins/defaults'
+
+  //add key files for SSL communication with CSS
+  addFile 'resources/keystore.jks', '/opt/ibm/wlp/usr/servers/defaultServer/resources/security'
+  addFile 'resources/truststore.jks', '/opt/ibm/wlp/usr/servers/defaultServer/resources/security'
+
+  //liberty.conf and event listener used by supervisor
+  addFile 'resources/liberty.conf', '/etc/supervisor/conf.d/'
+  addFile 'resources/supervisor_eventlistener.conf', '/etc/supervisor/conf.d/'
+
+  exposePort(9443)
+  exposePort(9080)
+
+	//entryPoint = ["/opt/ibm/wlp/bin/server", "run"]
+	//entryPoint = ["/opt/ibm/bin/", "setup.sh"]
+}
